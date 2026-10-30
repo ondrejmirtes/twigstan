@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb (Debian 12) to build, test, and lint TwigStan.
+# Runs once per fresh orb and again on stale snapshots, so every step is idempotent.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+PHP_VERSION=8.4
+COMPOSER_VERSION=2.11.0
+COMPOSER_SHA256=9674f12a2a181100d889ebfd0b4510805b3e94cea57869b14b383753d602599b
+CASTOR_VERSION=v1.9.1
+CASTOR_SHA256=3312568da9a593ad7d3ef6548f05c12d994dbc7140634e401531dc8d7de41764
+
+step() {
+  echo "==> $1"
+  SECONDS=0
+}
+done_step() {
+  echo "    (${SECONDS}s)"
+}
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi
+
+# Debian 12 only ships PHP 8.2; the project requires ^8.3, so use the Sury repository.
+step "PHP ${PHP_VERSION}"
+php_packages=(
+  "php${PHP_VERSION}-cli"
+  "php${PHP_VERSION}-curl"
+  "php${PHP_VERSION}-intl"
+  "php${PHP_VERSION}-mbstring"
+  "php${PHP_VERSION}-xml"
+  "php${PHP_VERSION}-zip"
+  unzip
+)
+missing=()
+for pkg in "${php_packages[@]}"; do
+  dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  if [ ! -f /etc/apt/sources.list.d/sury-php.list ]; then
+    $SUDO install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://packages.sury.org/php/apt.gpg | $SUDO tee /etc/apt/keyrings/sury-php.gpg >/dev/null
+    echo "deb [signed-by=/etc/apt/keyrings/sury-php.gpg] https://packages.sury.org/php/ bookworm main" \
+      | $SUDO tee /etc/apt/sources.list.d/sury-php.list >/dev/null
+  fi
+  $SUDO apt-get update -qq
+  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
+fi
+php --version | head -1
+done_step
+
+step "Composer ${COMPOSER_VERSION}"
+if ! composer --version 2>/dev/null | grep -q "Composer version ${COMPOSER_VERSION} "; then
+  tmp="$(mktemp)"
+  curl -fsSL -o "$tmp" "https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar"
+  echo "${COMPOSER_SHA256}  $tmp" | sha256sum -c --quiet -
+  $SUDO install -m 0755 "$tmp" /usr/local/bin/composer
+  rm -f "$tmp"
+fi
+composer --version --no-ansi 2>/dev/null
+done_step
+
+step "Castor ${CASTOR_VERSION}"
+if ! castor --version 2>/dev/null | grep -q "${CASTOR_VERSION#v}"; then
+  tmp="$(mktemp)"
+  curl -fsSL -o "$tmp" "https://github.com/jolicode/castor/releases/download/${CASTOR_VERSION}/castor.linux-amd64.phar"
+  echo "${CASTOR_SHA256}  $tmp" | sha256sum -c --quiet -
+  $SUDO install -m 0755 "$tmp" /usr/local/bin/castor
+  rm -f "$tmp"
+fi
+castor --version --no-ansi
+done_step
+
+step "composer install"
+composer install --no-interaction --no-progress
+done_step
